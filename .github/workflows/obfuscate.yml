@@ -1,4 +1,4 @@
-name: Generate and Obfuscate Worker Script
+name: ech-jp
 
 on:
   workflow_dispatch: # 手动触发
@@ -6,13 +6,14 @@ on:
     branches:
       - '**'  # 仅匹配分支推送，排除标签推送
     paths:
-      - 'Softether' # 仅当该源文件修改时触发
+      - '明文源吗' # 仅当该源文件修改时触发
 
 
 jobs:
   build-and-obfuscate:
     runs-on: ubuntu-latest
-    # 新增：避免多触发条件下重复运行（可选，推荐加）
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     concurrency:
       group: ${{ github.workflow }}
       cancel-in-progress: true
@@ -36,12 +37,12 @@ jobs:
           const fs = require('fs');
           const path = require('path');
           
-          const sourceFileName = 'Softether';
-          const outputFileName = '少年你相信光吗';
+          const sourceFileName = 'ech-jp';
+          const outputFileName = '_worker.js';
           const sourceFilePath = path.join(process.cwd(), sourceFileName);
 
           if (!fs.existsSync(sourceFilePath)) {
-            console.error('错误：在路径 \'' + sourceFilePath + '\' 未找到源文件。请确保您的仓库根目录有名为 \'Softether\' 的文件。');
+            console.error('错误：在路径 \'' + sourceFilePath + '\' 未找到源文件。请确保您的仓库根目录有名为 \'明文源吗\' 的文件。');
             process.exit(1);
           }
 
@@ -56,13 +57,13 @@ jobs:
               compact: true,
               controlFlowFlattening: true,
               controlFlowFlatteningThreshold: 0.75,
-              deadCodeInjection: true,
+              deadCodeInjection: false,
               stringArray: true,
               stringArrayEncoding: ['base64'],
               stringArrayThreshold: 1.0,
               stringArrayRotate: true,
               stringArrayShuffle: true,
-              stringArrayWrappersCount: 2,
+              stringArrayWrappersCount: 0,
               stringArrayWrappersChainedCalls: false,
               stringArrayWrappersParametersMaxCount: 3,
               renameGlobals: true,
@@ -97,7 +98,7 @@ jobs:
         run: |
           git config --global user.name 'GitHub Actions Bot'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add '少年你相信光吗'
+          git add '_worker.js'
           if git diff --staged --quiet; then
             echo "No changes to commit, the obfuscated file is already up-to-date."
           else
