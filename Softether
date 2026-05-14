@@ -1,159 +1,262 @@
-import { connect } from 'cloudflare:sockets';
-const uuid = '2523c510-9ff0-415b-9582-93949bfae7e3', maxED = 8192, MSS = 1400;
-export default { fetch: req => req.headers.get('Upgrade') === 'websocket' ? ws(req) : new Response('ok') };
-const idB = Uint8Array.fromHex(uuid.replaceAll('-', '')), dec = new TextDecoder(), enc = s => new TextEncoder().encode(s), E = new Uint8Array(0);
-const cat = (...a) => { const r = new Uint8Array(a.reduce((s, x) => s + x.length, 0)); a.reduce((o, x) => (r.set(x, o), o + x.length), 0); return r; };
-const u16 = (b, o) => b[o] << 8 | b[o + 1], u32 = (b, o) => (b[o] << 24 | b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]) >>> 0;
-const rng = n => crypto.getRandomValues(new Uint8Array(n)), rng16 = () => { const r = rng(2); return u16(r, 0); }, rng32 = () => { const r = rng(4); return u32(r, 0); };
-const ipB = ip => new Uint8Array(ip.split('.').map(Number)), papCred = enc(atob('dnBu'));
-const cksum = (d, o, n) => { let s = 0; for (let i = o; i < o + n - 1; i += 2) s += u16(d, i); if (n & 1) s += d[o + n - 1] << 8; while (s >> 16) s = (s & 0xFFFF) + (s >> 16); return (~s) & 0xFFFF; };
-const addr = (t, b) => t === 3 ? dec.decode(b) : t === 1 ? `${b[0]}.${b[1]}.${b[2]}.${b[3]}` : `[${Array.from({ length: 8 }, (_, i) => u16(b, i * 2).toString(16)).join(':')}]`;
-const parseAddr = (b, o, t) => { const l = t === 3 ? b[o++] : t === 1 ? 4 : t === 4 ? 16 : 0; return l && o + l <= b.length ? { addrBytes: b.subarray(o, o + l), dataOffset: o + l } : null; };
-const vless = c => { for (let i = 0; i < 16; i++) if (c[i + 1] !== idB[i]) return null; const o = 19 + c[17], p = u16(c, o), t = c[o + 2] === 1 ? 1 : c[o + 2] + 1, a = parseAddr(c, o + 3, t); return a ? { addrType: t, ...a, port: p } : null; };
-const resolveIP = async h => /^\d+\.\d+\.\d+\.\d+$/.test(h) ? h : (await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(h)}&type=A`, { headers: { Accept: 'application/dns-json' } }).then(r => r.json()).catch(() => ({}))).Answer?.find(a => a.type === 1)?.data ?? null;
-const getSstp = url => { const m = decodeURIComponent(url).match(/\/sstp:\/\/([^?&#\s]*)/i); if (!m) return null; const [host, p] = m[1].split(':'); return p ? { host, port: +p } : null; };
-const relay = async (rd, send, close) => { try { for (;;) { const { done, value } = await rd.read(); if (done) break; value?.byteLength && send(value); } } catch {} finally { rd.releaseLock(); close(); } };
-const createSstp = () => {
-  let buf = E, pppId = 1, sock, rd, wr, host, rb = new ArrayBuffer(65536);
-  const readBytes = async n => {
-    if (buf.length >= n) { const r = buf.subarray(0, n); buf = buf.subarray(n); return r; }
-    const saved = buf.length > 0 ? new Uint8Array(buf) : null, need = n - buf.length;
-    const { value, done } = await rd.readAtLeast(need, new Uint8Array(rb, 0, 65536));
-    if (done) throw 0; rb = value.buffer;
-    if (saved) { const t = cat(saved, value); buf = t.subarray(n); return t.subarray(0, n); }
-    buf = value.subarray(n); return value.subarray(0, n);
-  };
-  const readLine = async () => {
-    for (;;) {
-      const i = buf.indexOf(10);
-      if (i >= 0) { let l = dec.decode(buf.subarray(0, i)); buf = buf.subarray(i + 1); return l.replace(/\r$/, ''); }
-      const saved = buf.length > 0 ? new Uint8Array(buf) : null;
-      const { value, done } = await rd.readAtLeast(1, new Uint8Array(rb, 0, 65536));
-      if (done) throw 0; rb = value.buffer; buf = saved ? cat(saved, value) : value;
-    }
-  };
-  const readPkt = async (ms = 10000) => {
-    let t; const to = new Promise((_, r) => { t = setTimeout(() => r('T'), ms); });
-    try { const h = await Promise.race([readBytes(4), to]); clearTimeout(t); const len = u16(h, 2) & 0xFFF;
-      return { ctrl: (h[1] & 1) !== 0, body: len > 4 ? await readBytes(len - 4) : E }; } catch (e) { clearTimeout(t); throw e; }
-  };
-  const sstpData = f => { const n = 6 + f.length, p = new Uint8Array(n); p.set([0x10, 0, ((n >> 8) & 0xF) | 0x80, n & 0xFF, 0xFF, 0x03]); p.set(f, 6); return p; };
-  const sstpCtrl = (mt, attrs = []) => {
-    const al = attrs.reduce((s, a) => s + 4 + a.data.length, 0), p = new Uint8Array(8 + al), v = new DataView(p.buffer);
-    p[0] = 0x10; p[1] = 0x01; v.setUint16(2, (8 + al) | 0x8000); v.setUint16(4, mt); v.setUint16(6, attrs.length);
-    attrs.reduce((o, a) => (p[o + 1] = a.id, v.setUint16(o + 2, 4 + a.data.length), p.set(a.data, o + 4), o + 4 + a.data.length), 8);
-    return p;
-  };
-  const ppp = (proto, code, id, opts = []) => {
-    const ol = opts.reduce((s, o) => s + 2 + o.data.length, 0), f = new Uint8Array(6 + ol), v = new DataView(f.buffer);
-    v.setUint16(0, proto); f[2] = code; f[3] = id; v.setUint16(4, 4 + ol);
-    opts.reduce((o, x) => (f[o] = x.type, f[o + 1] = 2 + x.data.length, f.set(x.data, o + 2), o + 2 + x.data.length), 6);
-    return f;
-  };
-  const pap = id => { const ul = papCred.length, tl = 6 + ul * 2, f = new Uint8Array(2 + tl), v = new DataView(f.buffer);
-    v.setUint16(0, 0xc023); f[2] = 1; f[3] = id; v.setUint16(4, tl); f[6] = ul; f.set(papCred, 7); f[7 + ul] = ul; f.set(papCred, 8 + ul); return f; };
-  const parsePPP = d => { let o = d.length >= 2 && d[0] === 0xFF && d[1] === 0x03 ? 2 : 0; if (d.length - o < 4) return null;
-    const p = u16(d, o); return p === 0x0021 ? { protocol: p, ip: d.subarray(o + 2) } : d.length - o >= 6 ? { protocol: p, code: d[o + 2], id: d[o + 3], payload: d.subarray(o + 6), raw: d.subarray(o) } : null; };
-  const parseOpts = d => { const r = []; for (let i = 0; i + 2 <= d.length;) { const t = d[i], l = d[i + 1]; if (l < 2 || i + l > d.length) break; r.push({ type: t, data: d.subarray(i + 2, i + l) }); i += l; } return r; };
-  const connect_ = async (h, p) => { sock = connect({ hostname: h, port: p }, { secureTransport: 'on' }); await sock.opened;
-    rd = sock.readable.getReader({ mode: 'byob' }); wr = sock.writable.getWriter(); host = h; };
-  const establish = async () => {
-    const http = enc(`SSTP_DUPLEX_POST /sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/ HTTP/1.1\r\nHost: ${host}\r\nContent-Length: 18446744073709551615\r\nSSTPCORRELATIONID: {${crypto.randomUUID()}}\r\n\r\n`);
-    const pa = new Uint8Array(2); new DataView(pa.buffer).setUint16(0, 1); const mru = new Uint8Array(2); new DataView(mru.buffer).setUint16(0, 1500);
-    await wr.write(cat(http, sstpCtrl(0x0001, [{ id: 1, data: pa }]), sstpData(ppp(0xc021, 1, pppId++, [{ type: 1, data: mru }]))));
-    const st = await readLine(); while ((await readLine()) !== ''); if (!st.includes('200')) throw 0;
-    let sa = false, ld = false, auth = false, done = false, myIp = null;
-    for (let r = 0; r < 25 && !done; r++) {
-      const pk = await readPkt(); if (pk.ctrl) { if (!sa && pk.body.length >= 2 && u16(pk.body, 0) === 2) sa = true; continue; }
-      const pp = parsePPP(pk.body); if (!pp) continue;
-      if (pp.protocol === 0xc021) {
-        if (pp.code === 1) { const a = new Uint8Array(pp.raw); a[2] = 2;
-          await wr.write(ld && !auth ? cat(sstpData(a), sstpData(pap(pppId++))) : sstpData(a)); if (ld) auth = true;
-        } else if (pp.code === 2) { ld = true; if (!auth) { await wr.write(sstpData(pap(pppId++))); auth = true; } }
-      } else if (pp.protocol === 0xc023 && pp.code === 2) await wr.write(sstpData(ppp(0x8021, 1, pppId++, [{ type: 3, data: new Uint8Array(4) }])));
-      else if (pp.protocol === 0x8021) {
-        if (pp.code === 1) { const a = new Uint8Array(pp.raw); a[2] = 2; await wr.write(sstpData(a)); }
-        else if (pp.code === 3) { const o = parseOpts(pp.payload).find(x => x.type === 3); if (o) { myIp = [...o.data].join('.'); await wr.write(sstpData(ppp(0x8021, 1, pppId++, [{ type: 3, data: o.data }]))); } }
-        else if (pp.code === 2) { const o = parseOpts(pp.payload).find(x => x.type === 3); if (o) myIp = [...o.data].join('.'); done = true; }
-      }
-    }
-    if (!myIp) throw 0; return myIp;
-  };
-  const close = () => { [rd, wr, sock].forEach(x => { try { x?.cancel?.() ?? x?.close?.(); } catch {} }); };
-  return { connect: connect_, establish, readPkt, parsePPP, get buf() { return buf; }, get wr() { return wr; }, close };
+const CFG = { id: '88888888-8888-8888-8888-888888888888', chunk: 64 * 1024, dnPack: 32 * 1024, dnTail: 512, dnMs: 0, upPack: 16 * 1024, upQMax: 256 * 1024, maxED: 8 * 1024, concur: 1 };
+
+const 默认备用小可爱地址 = 'dsl253-007-079.nyc1.dsl.speakeasy.net';
+const 主连接超时毫秒 = 2000;
+const 备用连接超时毫秒 = 4000;
+
+const txt缓存生存期ms = 60 * 1000;
+const txt失败缓存生存期ms = 10 * 1000;
+
+const hex = c => (c > 64 ? c + 9 : c) & 0xF;
+const idB = new Uint8Array(16), dec = new TextDecoder('utf-8');
+for (let i = 0, p = 0, c, h; i < 16; i++) {
+c = CFG.id.charCodeAt(p++); c === 45 && (c = CFG.id.charCodeAt(p++));
+h = hex(c);
+c = CFG.id.charCodeAt(p++); c === 45 && (c = CFG.id.charCodeAt(p++));
+idB[i] = h << 4 | hex(c);
+}
+const [SZ0, SZ1, SZ2, SZ3, SZ4, SZ5, SZ6, SZ7, SZ8, SZ9, SZ10, SZ11, SZ12, SZ13, SZ14, SZ15] = idB;
+
+const matchID = c =>
+c[1] === SZ0 && c[2] === SZ1 && c[3] === SZ2 && c[4] === SZ3 &&
+c[5] === SZ4 && c[6] === SZ5 && c[7] === SZ6 && c[8] === SZ7 &&
+c[9] === SZ8 && c[10] === SZ9 && c[11] === SZ10 && c[12] === SZ11 &&
+c[13] === SZ12 && c[14] === SZ13 && c[15] === SZ14 && c[16] === SZ15;
+
+const parseHeader = (c, hasSSPass) => {
+if (c.length < 7) return null;
+const proto = c[0];
+let host = '', port = 0, offset = 0;
+
+if (proto === 0) {
+if (c.length < 24 || !matchID(c)) return null;
+const optLen = c[17];
+const cmdPos = 18 + optLen;
+if (cmdPos >= c.length || c[cmdPos] !== 1) return null;
+if (cmdPos + 4 > c.length) return null;
+port = (c[cmdPos + 1] << 8) | c[cmdPos + 2];
+const addrType = c[cmdPos + 3];
+let addrPos = cmdPos + 4;
+
+if (addrType === 1) {
+if (c.length < addrPos + 4) return null;
+host = `${c[addrPos]}.${c[addrPos+1]}.${c[addrPos+2]}.${c[addrPos+3]}`;
+offset = addrPos + 4;
+} else if (addrType === 2) {
+if (c.length < addrPos + 1) return null;
+const len = c[addrPos];
+if (c.length < addrPos + 1 + len) return null;
+host = dec.decode(c.subarray(addrPos + 1, addrPos + 1 + len));
+offset = addrPos + 1 + len;
+} else if (addrType === 3) {
+if (c.length < addrPos + 16) return null;
+const ipv6 = [];
+for (let i = 0; i < 8; i++) ipv6.push(((c[addrPos + i*2] << 8) | c[addrPos + i*2 + 1]).toString(16));
+host = ipv6.join(':');
+offset = addrPos + 16;
+} else return null;
+return { host, port, offset, isVless: true };
+
+} else if (proto === 1 || proto === 3 || proto === 4) {
+if (!hasSSPass) return null;
+
+if (proto === 1) {
+host = `${c[1]}.${c[2]}.${c[3]}.${c[4]}`;
+port = (c[5] << 8) | c[6];
+offset = 7;
+} else if (proto === 3) {
+const len = c[1];
+if (c.length < 4 + len) return null;
+host = dec.decode(c.subarray(2, 2 + len));
+port = (c[2 + len] << 8) | c[3 + len];
+offset = 4 + len;
+} else {
+if (c.length < 19) return null;
+const ipv6 = [];
+for (let i = 0; i < 8; i++) ipv6.push(((c[1 + i*2] << 8) | c[2 + i*2]).toString(16));
+host = ipv6.join(':');
+port = (c[17] << 8) | c[18];
+offset = 19;
+}
+return { host, port, offset, isVless: false };
+}
+
+return null;
 };
-const createTcp = (sstp, srcIp, dstIp, dstPort) => {
-  const srcPort = 10000 + (rng16() % 50000), srcB = ipB(srcIp), dstB = ipB(dstIp);
-  let seq = rng32(), ack = 0;
-  const ipTpl = new Uint8Array(20); ipTpl.set([0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6]); ipTpl.set(srcB, 12); ipTpl.set(dstB, 16);
-  const pseudo = new Uint8Array(1432); pseudo.set(srcB); pseudo.set(dstB, 4); pseudo[9] = 6;
-  const frame = (flags, data = E) => {
-    const pl = data.length, tl = 20 + pl, il = 20 + tl, st = 8 + il, f = new Uint8Array(st), v = new DataView(f.buffer);
-    f.set([0x10, 0, ((st >> 8) & 0xF) | 0x80, st & 0xFF, 0xFF, 0x03, 0, 0x21]); f.set(ipTpl, 8);
-    v.setUint16(10, il); v.setUint16(12, rng16()); v.setUint16(18, cksum(f, 8, 20));
-    v.setUint16(28, srcPort); v.setUint16(30, dstPort); v.setUint32(32, seq); v.setUint32(36, ack);
-    f[40] = 0x50; f[41] = flags; v.setUint16(42, 65535); if (pl) f.set(data, 48);
-    pseudo[10] = tl >> 8; pseudo[11] = tl & 0xFF; pseudo.set(f.subarray(28, 28 + tl), 12);
-    v.setUint16(44, cksum(pseudo, 0, 12 + tl)); return f;
-  };
-  const match = ip => { if (ip.length < 40 || ip[9] !== 6) return null; const ihl = (ip[0] & 0xF) * 4;
-    if (u16(ip, ihl) !== dstPort || u16(ip, ihl + 2) !== srcPort) return null;
-    return { flags: ip[ihl + 13], seq: u32(ip, ihl + 4), off: ihl + ((ip[ihl + 12] >> 4) & 0xF) * 4 }; };
-  const handshake = async () => {
-    await sstp.wr.write(frame(0x02)); seq++;
-    for (let i = 0; i < 30; i++) { const pk = await sstp.readPkt(); if (pk.ctrl) continue;
-      const pp = sstp.parsePPP(pk.body); if (!pp || pp.protocol !== 0x0021) continue;
-      const m = match(pp.ip); if (!m || (m.flags & 0x12) !== 0x12) continue;
-      ack = (m.seq + 1) >>> 0; sstp.wr.write(frame(0x10)); return true; }
-    throw 0;
-  };
-  return { frame, match, handshake, get seq() { return seq; }, set seq(v) { seq = v; }, get ack() { return ack; }, set ack(v) { ack = v; } };
+
+const mkQ = (cap, qCap = cap, itemsMax = Math.max(1, qCap >> 8)) => {
+let q = [], h = 0, qB = 0, buf = null;
+const trim = () => { h > 32 && h * 2 >= q.length && (q = q.slice(h), h = 0); };
+const take = () => { if (h >= q.length) return null; const d = q[h]; q[h++] = undefined; qB -= d.byteLength; trim(); return d; };
+return { get bytes() { return qB; }, get size() { return q.length - h; }, get empty() { return h >= q.length; }, clear() { q = []; h = 0; qB = 0; },
+sow(d) { const n = d?.byteLength || 0; if (!n) return 1; if (qB + n > qCap || q.length - h >= itemsMax) return 0; q.push(d); qB += n; return 1; },
+bundle(d) {
+d ||= take(); if (!d || h >= q.length || d.byteLength >= cap) return [d, 0];
+let n = d.byteLength, e = h; while (e < q.length) { const x = q[e], nn = n + x.byteLength; if (nn > cap) break; n = nn; e++; }
+if (e === h) return [d, 0]; const out = buf ||= new Uint8Array(cap); out.set(d);
+for (let o = d.byteLength; h < e;) { const x = q[h]; q[h++] = undefined; qB -= x.byteLength; out.set(x, o); o += x.byteLength; } trim(); return [out.subarray(0, n), 1]; } }; };
+
+const mkDn = w => {
+const cap = CFG.dnPack, tail = CFG.dnTail, low = Math.max(4096, tail << 3);
+let pb = new Uint8Array(cap), p = 0, tp = 0, mq = 0, gen = 0, qk = 0, qr = 0;
+const reap = () => { tp && clearTimeout(tp); tp = 0; mq = 0; if (!p) return; w.send(pb.subarray(0, p).slice()); pb = new Uint8Array(cap); p = 0; qr = 0; };
+const ripen = () => { if (tp || mq) return; mq = 1; qk = gen; queueMicrotask(() => { mq = 0; if (!p || tp) return; if (cap - p < tail) return reap(); tp = setTimeout(() => { tp = 0; if (!p) return; if (cap - p < tail) return reap(); if (qr < 2 && (gen !== qk || p < low)) { qr++; qk = gen; return ripen(); } reap(); }, Math.max(CFG.dnMs, 1)); }); };
+return { send(u) { let o = 0, n = u?.byteLength || 0; if (!n) return; while (o < n) { if (!p && n - o >= cap) { const m = Math.min(cap, n - o); w.send(o || m !== n ? u.subarray(o, o + m) : u); o += m; continue; } const m = Math.min(cap - p, n - o); pb.set(u.subarray(o, o + m), p); p += m; o += m; gen++; if (p === cap || cap - p < tail) reap(); else ripen(); } }, reap }; };
+
+const mill = async (rd, w) => {
+const r = rd.getReader({ mode: 'byob' }), tx = mkDn(w); let buf = new ArrayBuffer(CFG.chunk);
+let loopCount = 0;
+try {
+for (;;) {
+const { done, value: v } = await r.read(new Uint8Array(buf, 0, CFG.chunk));
+if (done) break;
+if (!v?.byteLength) continue;
+if (v.byteLength >= (CFG.chunk >> 1)) {
+tx.reap(); tx.send(v.slice()); buf = new ArrayBuffer(CFG.chunk);
+} else {
+tx.send(v.slice()); buf = v.buffer;
+}
+if (++loopCount > 128) { loopCount = 0; await new Promise(queueMicrotask); }
+}
+tx.reap();
+} catch {} finally { try { tx.reap(); } catch {} try { r.releaseLock(); } catch {} }
 };
-const sstpConn = async ({ host, port }, ipP, targetPort) => {
-  const sstp = createSstp(), close = () => sstp.close();
-  try {
-    await sstp.connect(host, port);
-    const [myIp, targetIp] = await Promise.all([sstp.establish(), ipP]); if (!targetIp) { close(); return null; }
-    const tcp = createTcp(sstp, myIp, targetIp, targetPort); await tcp.handshake();
-    let ctrl = null;
-    const readable = new ReadableStream({ start: c => { ctrl = c; }, cancel: close });
-    (async () => {
-      try { let pend = [], pLen = 0;
-        const flush = () => { if (!pLen) return; ctrl.enqueue(pend.length === 1 ? pend[0] : cat(...pend)); pend = []; pLen = 0; sstp.wr.write(tcp.frame(0x10)).catch(() => {}); };
-        for (;;) { const pk = await sstp.readPkt(60000); if (pk.ctrl) continue;
-          const pp = sstp.parsePPP(pk.body); if (!pp || pp.protocol !== 0x0021) continue;
-          const m = tcp.match(pp.ip); if (!m) continue;
-          if (m.off < pp.ip.length) { const d = pp.ip.subarray(m.off); if (d.length) { tcp.ack = (m.seq + d.length) >>> 0; pend.push(new Uint8Array(d)); pLen += d.length; } }
-          if (m.flags & 0x01) { flush(); tcp.ack = (tcp.ack + 1) >>> 0; sstp.wr.write(tcp.frame(0x11)).catch(() => {}); ctrl.close(); return; }
-          if (sstp.buf.length < 4 || pLen >= 32768) flush();
-        }
-      } catch { try { ctrl.close(); } catch {} }
-    })();
-    const writable = new WritableStream({
-      async write(chunk) { const d = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-        if (d.length <= MSS) { await sstp.wr.write(tcp.frame(0x18, d)); tcp.seq = (tcp.seq + d.length) >>> 0; return; }
-        const frames = []; for (let o = 0; o < d.length; o += MSS) { const seg = d.subarray(o, Math.min(o + MSS, d.length)); frames.push(tcp.frame(0x18, seg)); tcp.seq = (tcp.seq + seg.length) >>> 0; }
-        await sstp.wr.write(cat(...frames));
-      }, close: () => sstp.wr.write(tcp.frame(0x11)).catch(() => {}), abort: close
-    });
-    return { readable, writable, close };
-  } catch { close(); return null; }
+
+const 地址合法正则 = /^[a-zA-Z0-9._\-:[\]]+$/;
+const 路径IP正则 = /^\/ip=([^&\/]+)/;
+
+function 校验候选地址(候选地址) {
+if (!候选地址 || 候选地址.length > 253 || 候选地址 === '.' || 候选地址 === '[]' || 候选地址 === '..' || 候选地址.startsWith('./') || 候选地址.startsWith('../') || 候选地址.startsWith(':') || !地址合法正则.test(候选地址)) { return 默认备用小可爱地址; }
+return 候选地址;
+}
+
+const txt缓存池 = new Map();
+const txt请求池 = new Map();
+
+async function 获取动态地址(输入参数) {
+if (!输入参数.includes('://') && !输入参数.includes('/')) return 校验候选地址(输入参数);
+const 链接 = 输入参数.startsWith('http') ? 输入参数 : 'https://' + 输入参数;
+const 当前时间 = Date.now();
+const 缓存 = txt缓存池.get(链接);
+if (缓存 && 当前时间 < 缓存.过期时间) return 缓存.目标地址;
+
+let req = txt请求池.get(链接);
+if (!req) {
+req = (async () => {
+try {
+const 响应 = await fetch(链接, { headers: { 'User-Agent': 'Mozilla/5.0' }, cf: { cacheTtl: 60 } });
+if (响应.ok) {
+const 文本 = await 响应.text();
+const 校验结果 = 校验候选地址(文本.replace(/[\r\n\s\uFEFF]/g, ''));
+if (校验结果 !== 默认备用小可爱地址) {
+txt缓存池.set(链接, { 目标地址: 校验结果, 过期时间: Date.now() + txt缓存生存期ms });
+return 校验结果;
+}
+}
+} catch (e) {}
+txt缓存池.set(链接, { 目标地址: 默认备用小可爱地址, 过期时间: Date.now() + txt失败缓存生存期ms });
+return 默认备用小可爱地址;
+})();
+txt请求池.set(链接, req);
+req.finally(() => txt请求池.delete(链接));
+}
+
+return await req;
+}
+
+function 拆分地址和端口(地址字符串, 默认端口) {
+const 校验 = p => (Number.isInteger(p) && p >= 1 && p <= 65535 ? p : 默认端口);
+if (地址字符串.startsWith('[')) {
+const 括号结束 = 地址字符串.indexOf(']');
+if (括号结束 === -1) return { 备用主机: 地址字符串, 备用端口: 默认端口 };
+return { 备用主机: 地址字符串.slice(0, 括号结束 + 1), 备用端口: 校验(Number(地址字符串.slice(括号结束 + 2))) };
+}
+const 冒号位 = 地址字符串.lastIndexOf(':');
+if (冒号位 === -1 || 地址字符串.indexOf(':') !== 冒号位) return { 备用主机: 地址字符串, 备用端口: 默认端口 };
+return { 备用主机: 地址字符串.slice(0, 冒号位), 备用端口: 校验(Number(地址字符串.slice(冒号位 + 1))) };
+}
+
+const sprout = (f, h, p, s = f.connect({ hostname: h, port: p })) => s.opened.then(() => s);
+const raceSprout = (f, h, p) => {
+if (!f?.connect) return Promise.reject(new Error('connect unavailable'));
+if (CFG.concur <= 1) return sprout(f, h, p);
+const ts = Array.from({ length: CFG.concur }, () => sprout(f, h, p));
+return Promise.any(ts).then(w => { ts.forEach(t => t.then(s => s !== w && s.close(), () => {})); return w; });
 };
-const ws = async req => {
-  const [client, server] = Object.values(new WebSocketPair()); server.accept();
-  const ed = req.headers.get('sec-websocket-protocol'), ep = getSstp(req.url);
-  let w = null, sock = null, chain = Promise.resolve();
-  const close = () => { try { sock?.close(); } catch {} try { server.close(); } catch {} }, send = d => { try { server.send(d); } catch {} };
-  const process = async chunk => {
-    if (w) return w.write(chunk);
-    const v = vless(chunk); if (!v) return close(); send(new Uint8Array([chunk[0], 0]));
-    const { addrType, addrBytes, dataOffset, port } = v, host = addr(addrType, addrBytes), payload = chunk.subarray(dataOffset);
-    if (!ep) return close();
-    sock = await sstpConn(ep, addrType === 1 ? host : resolveIP(host), port); if (!sock) return close();
-    w = sock.writable.getWriter(); payload.byteLength && await w.write(payload); relay(sock.readable.getReader(), send, close);
-  };
-  if (ed?.length <= maxED) chain = chain.then(() => process(Uint8Array.fromBase64(ed, { alphabet: 'base64url' }))).catch(close);
-  server.addEventListener('message', e => { chain = chain.then(() => process(new Uint8Array(e.data instanceof ArrayBuffer ? e.data : e.data.buffer ?? e.data))).catch(close); });
-  server.addEventListener('close', close); server.addEventListener('error', close);
-  return new Response(null, { status: 101, webSocket: client, headers: ed ? { 'sec-websocket-protocol': ed } : {} });
+
+async function 带超时的并发抢答引擎(fetcher, 主机, 端口, 超时ms) {
+let 炸弹定时器;
+const 超时炸弹 = new Promise((_, reject) => { 炸弹定时器 = setTimeout(() => reject(new Error('连接超时')), 超时ms); });
+try { return await Promise.race([raceSprout(fetcher, 主机, 端口), 超时炸弹]); }
+finally { clearTimeout(炸弹定时器); }
+}
+
+const ws = async (req, 当前备用地址, 携带SS通行证) => {
+const [client, server] = Object.values(new WebSocketPair());
+server.accept({ allowHalfOpen: true }); server.binaryType = 'arraybuffer';
+const fetcher = req.fetcher;
+const edStr = req.headers.get('sec-websocket-protocol');
+const ed = edStr && edStr.length <= CFG.maxED * 4 / 3 + 4 ? /** @type {*} */ (Uint8Array).fromBase64(edStr, { alphabet: 'base64url' }) : null;
+let curW = null, sock = null, closed = false, busy = false;
+const uq = mkQ(CFG.upPack, CFG.upQMax, CFG.upQMax >> 8);
+const wither = () => { if (closed) return; closed = true; uq.clear(); try { curW?.releaseLock(); } catch {} try { sock?.close(); } catch {} try { server.close(); } catch {} };
+const toU8 = d => { if (!d) return new Uint8Array(0); return d instanceof Uint8Array ? d : ArrayBuffer.isView(d) ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength) : new Uint8Array(d); };
+const sow = d => { const u = toU8(d), n = u.byteLength; if (!n) return 1; if (uq.sow(u)) return 1; wither(); return 0; };
+
+const tryConnect = async (host, port) => {
+try { return await 带超时的并发抢答引擎(fetcher, host, port, 主连接超时毫秒); } catch {}
+const { 备用主机: h2, 备用端口: p2 } = 拆分地址和端口(当前备用地址, port);
+if (h2) try { return await 带超时的并发抢答引擎(fetcher, h2, p2, 备用连接超时毫秒); } catch {}
+if (当前备用地址 !== 默认备用小可爱地址) {
+const { 备用主机: h3, 备用端口: p3 } = 拆分地址和端口(默认备用小可爱地址, port);
+if (h3) try { return await 带超时的并发抢答引擎(fetcher, h3, p3, 备用连接超时毫秒); } catch {}
+}
+return null;
+};
+
+const thresh = async () => { if (busy || closed) return; busy = true; try { for (;;) {
+if (closed) break;
+if (!sock) {
+const [d] = uq.bundle(); if (!d) break;
+const r = parseHeader(d, 携带SS通行证);
+if (!r) { wither(); break; }
+if (r.isVless) server.send(new Uint8Array([d[0], 0]));
+const host = r.host, port = r.port, payload = d.subarray(r.offset);
+sock = await tryConnect(host, port);
+if (!sock) { wither(); break; }
+curW = sock.writable.getWriter();
+const [first] = uq.bundle(payload);
+first?.byteLength && await curW.write(first);
+mill(sock.readable, server).finally(() => wither());
+continue;
+}
+const [d] = uq.bundle(); if (!d) break; await curW.write(d);
+} } catch { wither(); } finally { busy = false; !uq.empty && !closed && queueMicrotask(thresh); } };
+
+if (ed && sow(ed)) thresh();
+server.addEventListener('message', e => { closed || (sow(e.data) && thresh()); });
+server.addEventListener('close', () => wither()); server.addEventListener('error', () => wither());
+return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Extensions': '' } });
+};
+
+export default {
+async fetch(req) {
+if (req.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
+const 网址 = new URL(req.url);
+const 携带SS通行证 = 网址.pathname.includes(CFG.id);
+
+let 候选地址 = 默认备用小可爱地址;
+if (网址.searchParams.has('ip')) {
+候选地址 = 网址.searchParams.get('ip');
+} else {
+const 提取路径IP = 网址.pathname.match(路径IP正则);
+if (提取路径IP) 候选地址 = decodeURIComponent(提取路径IP[1]);
+}
+
+const 当前备用地址 = await 获取动态地址(候选地址);
+return ws(req, 当前备用地址, 携带SS通行证);
+}
+
+return new Response('Not Found', { status: 404 });
+},
 };
