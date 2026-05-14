@@ -1,6 +1,6 @@
 const CFG = { id: 'e258977b-e413-4718-a3af-02d75492c349', chunk: 64 * 1024, dnPack: 32 * 1024, dnTail: 512, dnMs: 0, upPack: 16 * 1024, upQMax: 256 * 1024, maxED: 8 * 1024, concur: 1 };
 
-const 备用地址 = 'dsl253-007-079.nyc1.dsl.speakeasy.net';
+const 备用地址 = 'us.xmm.asia';
 const 主连接超时毫秒 = 2000;
 const 备用连接超时毫秒 = 4000;
 
