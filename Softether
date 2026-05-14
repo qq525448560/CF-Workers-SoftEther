@@ -1,6 +1,6 @@
-const CFG = { id: '88888888-8888-8888-8888-888888888888', chunk: 64 * 1024, dnPack: 32 * 1024, dnTail: 512, dnMs: 0, upPack: 16 * 1024, upQMax: 256 * 1024, maxED: 8 * 1024, concur: 1 };
+const CFG = { id: 'e258977b-e413-4718-a3af-02d75492c349', chunk: 64 * 1024, dnPack: 32 * 1024, dnTail: 512, dnMs: 0, upPack: 16 * 1024, upQMax: 256 * 1024, maxED: 8 * 1024, concur: 1 };
 
-const 默认备用小可爱地址 = 'dsl253-007-079.nyc1.dsl.speakeasy.net';
+const 备用地址 = 'dsl253-007-079.nyc1.dsl.speakeasy.net';
 const 主连接超时毫秒 = 2000;
 const 备用连接超时毫秒 = 4000;
 
@@ -126,7 +126,7 @@ const 地址合法正则 = /^[a-zA-Z0-9._\-:[\]]+$/;
 const 路径IP正则 = /^\/ip=([^&\/]+)/;
 
 function 校验候选地址(候选地址) {
-if (!候选地址 || 候选地址.length > 253 || 候选地址 === '.' || 候选地址 === '[]' || 候选地址 === '..' || 候选地址.startsWith('./') || 候选地址.startsWith('../') || 候选地址.startsWith(':') || !地址合法正则.test(候选地址)) { return 默认备用小可爱地址; }
+if (!候选地址 || 候选地址.length > 253 || 候选地址 === '.' || 候选地址 === '[]' || 候选地址 === '..' || 候选地址.startsWith('./') || 候选地址.startsWith('../') || 候选地址.startsWith(':') || !地址合法正则.test(候选地址)) { return 备用地址; }
 return 候选地址;
 }
 
@@ -148,14 +148,14 @@ const 响应 = await fetch(链接, { headers: { 'User-Agent': 'Mozilla/5.0' }, c
 if (响应.ok) {
 const 文本 = await 响应.text();
 const 校验结果 = 校验候选地址(文本.replace(/[\r\n\s\uFEFF]/g, ''));
-if (校验结果 !== 默认备用小可爱地址) {
+if (校验结果 !== 备用地址) {
 txt缓存池.set(链接, { 目标地址: 校验结果, 过期时间: Date.now() + txt缓存生存期ms });
 return 校验结果;
 }
 }
 } catch (e) {}
-txt缓存池.set(链接, { 目标地址: 默认备用小可爱地址, 过期时间: Date.now() + txt失败缓存生存期ms });
-return 默认备用小可爱地址;
+txt缓存池.set(链接, { 目标地址: 备用地址, 过期时间: Date.now() + txt失败缓存生存期ms });
+return 备用地址;
 })();
 txt请求池.set(链接, req);
 req.finally(() => txt请求池.delete(链接));
@@ -207,8 +207,8 @@ const tryConnect = async (host, port) => {
 try { return await 带超时的并发抢答引擎(fetcher, host, port, 主连接超时毫秒); } catch {}
 const { 备用主机: h2, 备用端口: p2 } = 拆分地址和端口(当前备用地址, port);
 if (h2) try { return await 带超时的并发抢答引擎(fetcher, h2, p2, 备用连接超时毫秒); } catch {}
-if (当前备用地址 !== 默认备用小可爱地址) {
-const { 备用主机: h3, 备用端口: p3 } = 拆分地址和端口(默认备用小可爱地址, port);
+if (当前备用地址 !== 备用地址) {
+const { 备用主机: h3, 备用端口: p3 } = 拆分地址和端口(备用地址, port);
 if (h3) try { return await 带超时的并发抢答引擎(fetcher, h3, p3, 备用连接超时毫秒); } catch {}
 }
 return null;
@@ -245,7 +245,7 @@ if (req.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
 const 网址 = new URL(req.url);
 const 携带SS通行证 = 网址.pathname.includes(CFG.id);
 
-let 候选地址 = 默认备用小可爱地址;
+let 候选地址 = 备用地址;
 if (网址.searchParams.has('ip')) {
 候选地址 = 网址.searchParams.get('ip');
 } else {
