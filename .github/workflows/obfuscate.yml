@@ -6,7 +6,7 @@ on:
     branches:
       - '**'  # 仅匹配分支推送，排除标签推送
     paths:
-      - '明文源吗' # 仅当该源文件修改时触发
+      - 'Softether' # 仅当该源文件修改时触发
 
 
 jobs:
@@ -56,11 +56,11 @@ jobs:
           const obfuscationOptions = {
               compact: true,
               controlFlowFlattening: true,
-              controlFlowFlatteningThreshold: 0.75,
+              controlFlowFlatteningThreshold: 0.5,
               deadCodeInjection: false,
               stringArray: true,
               stringArrayEncoding: ['base64'],
-              stringArrayThreshold: 1.0,
+              stringArrayThreshold: 0.75,
               stringArrayRotate: true,
               stringArrayShuffle: true,
               stringArrayWrappersCount: 0,
@@ -77,7 +77,7 @@ jobs:
               numbersToExpressions: false,
               simplify: false,
               splitStrings: true,
-              splitStringsChunkLength: 1,
+              splitStringsChunkLength: 0.75,
               transformObjectKeys: true,
               unicodeEscapeSequence: true,
               selfDefending: false,
